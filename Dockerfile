@@ -105,6 +105,15 @@ RUN chmod -R a+rX /opt/hermes && \
 # this a fast (~1s) egg-link creation with no resolution or downloads.
 RUN uv pip install --no-cache-dir --no-deps -e "."
 
+# ---------- Classical-ML stack for the `ml` profile's "handle it here" path ----------
+# numpy/pandas/scikit-learn/scipy already come in via the deps above; these add
+# the gradient-boosting + stats workhorses the quant/optionslab ML routing leans
+# on for tabular work. Deep learning is NOT installed here on purpose — torch +
+# CUDA live only in the hermes-ml sidecar (docker/Dockerfile.ml). `exclude-newer`
+# is overridden because pyproject's `[tool.uv] exclude-newer = "7 days"` would
+# otherwise filter fresh wheels during an ad-hoc install.
+RUN uv pip install --no-cache --exclude-newer 2030-01-01 xgboost lightgbm statsmodels
+
 # ---------- Runtime ----------
 ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
 ENV HERMES_HOME=/opt/data
