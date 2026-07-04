@@ -49,7 +49,7 @@ RUN . /opt/hermes/.venv/bin/activate && \
       --extra-index-url https://pypi.org/simple \
       torch==2.5.1+cu121 && \
     uv pip install --no-cache --exclude-newer 2030-01-01 \
-      numpy pandas scikit-learn
+      numpy pandas scikit-learn xgboost lightgbm statsmodels
 
 # New venv files are root-owned; mirror the base image's world-readable policy
 # so the remapped runtime `hermes` user (HERMES_UID) can import them.
