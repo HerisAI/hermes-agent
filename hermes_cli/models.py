@@ -2698,6 +2698,13 @@ def copilot_model_api_mode(
             # For non-GPT-5 models, check if they only support messages API
             if "/v1/messages" in supported_endpoints and "/chat/completions" not in supported_endpoints:
                 return "anthropic_messages"
+            # Responses-only models that the GPT-5 name pattern does not catch
+            # (e.g. ``grok-4.5``, which Copilot exposes solely on /responses).
+            # Without this they fall through to /chat/completions and the API
+            # answers 400 ``unsupported_api_for_model``, which reaches the user
+            # as an empty completion rather than an error.
+            if "/responses" in supported_endpoints and "/chat/completions" not in supported_endpoints:
+                return "codex_responses"
 
     return "chat_completions"
 
