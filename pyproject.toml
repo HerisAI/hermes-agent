@@ -136,6 +136,20 @@ rl = [
   "wandb>=0.15.0,<1",
 ]
 yc-bench = ["yc-bench @ git+https://github.com/collinear-ai/yc-bench.git@bfb0c88062450f46341bd9a5298903fc2e952a5c ; python_version >= '3.12'"]
+# Portfolio math for the investor profile's weekly review (MV / Risk Parity /
+# Black-Litterman via PyPortfolioOpt, 3y daily price history via yfinance).
+# Pulls in scipy/cvxpy/scikit-learn transitively — ~80MB of wheels.
+portfolio = [
+  "PyPortfolioOpt>=1.5,<2",
+  "yfinance>=0.2,<2",
+]
+# YouTube transcript fetching for the youtube-content skill (used by the
+# trader profile's daily buy-signal digest cron). Without this, the prefetch
+# script exits non-zero and the digest agent falls back to a setup-error
+# response instead of a real report.
+youtube = [
+  "youtube-transcript-api>=1,<2",
+]
 all = [
   "hermes-agent[modal]",
   "hermes-agent[daytona]",
@@ -163,6 +177,8 @@ all = [
   "hermes-agent[mistral]",
   "hermes-agent[bedrock]",
   "hermes-agent[web]",
+  "hermes-agent[portfolio]",
+  "hermes-agent[youtube]",
 ]
 
 [project.scripts]

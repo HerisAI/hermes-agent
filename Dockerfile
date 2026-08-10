@@ -112,7 +112,7 @@ RUN uv pip install --no-cache-dir --no-deps -e "."
 # CUDA live only in the hermes-ml sidecar (docker/Dockerfile.ml). `exclude-newer`
 # is overridden because pyproject's `[tool.uv] exclude-newer = "7 days"` would
 # otherwise filter fresh wheels during an ad-hoc install.
-RUN uv pip install --no-cache --exclude-newer 2030-01-01 xgboost lightgbm statsmodels
+RUN uv pip install --no-cache --exclude-newer 2030-01-01 xgboost lightgbm statsmodels duckdb networkx pgmpy
 
 # ---------- Runtime ----------
 ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
