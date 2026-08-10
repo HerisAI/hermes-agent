@@ -1176,6 +1176,19 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
+# Safety ceiling (seconds) applied to compute-heavy research profiles when a
+# task is created without an explicit ``max_runtime_seconds``. A worker that
+# blows past this gets SIGTERM→SIGKILL'd by ``terminate_overrunning_workers``
+# instead of orphaning a runaway HPO/backtest that pegs every core. Generous on
+# purpose — a legitimately long job still finishes; only true runaways hit the
+# wall. Override per task by passing ``max_runtime_seconds`` explicitly.
+_DEFAULT_RUNTIME_CAP_BY_PROFILE = {
+    "ml": 7200,
+    "quant": 7200,
+    "optionslab": 7200,
+}
+
+
 def create_task(
     conn: sqlite3.Connection,
     *,
@@ -1270,6 +1283,11 @@ def create_task(
             return row["id"]
 
     now = int(time.time())
+
+    # Compute-heavy profiles get a default runtime ceiling so a runaway
+    # worker can't orphan an uncapped job. Explicit callers always win.
+    if max_runtime_seconds is None and assignee:
+        max_runtime_seconds = _DEFAULT_RUNTIME_CAP_BY_PROFILE.get(assignee)
 
     # Retry once on the extremely unlikely id collision.
     for attempt in range(2):
@@ -2870,6 +2888,58 @@ def _pid_alive(pid: Optional[int]) -> bool:
     return True
 
 
+def _signal_worker_group(
+    pid: Optional[int],
+    sig: int,
+    *,
+    signal_fn=None,
+) -> bool:
+    """Signal a worker's whole process *group*, not just its leader PID.
+
+    Workers are spawned with ``start_new_session=True`` (see
+    ``_default_spawn``), so each worker is a session / process-group
+    leader with ``pgid == pid``. Signalling the group — via
+    ``os.killpg(pid, …)`` — reaps detached grandchildren (e.g. a
+    backgrounded Optuna HPO or backtest the worker launched but never
+    waited on) that would otherwise be re-parented to init and keep
+    running, pegging the CPU, long after the supervising worker crashed,
+    was reclaimed, or timed out. ``killpg`` keeps working even once the
+    leader itself has exited, because a process group lives as long as
+    any member does — which is exactly the orphan case.
+
+    Falls back to signalling the bare PID on Windows (no ``killpg``) or
+    when a test ``signal_fn`` stub is supplied. Best-effort: returns True
+    if a signal was delivered, False otherwise. Never raises.
+    """
+    if not pid or int(pid) <= 0:
+        return False
+    pid = int(pid)
+    # Test hook / Windows: preserve bare-pid behaviour so ``signal_fn``
+    # stubs keep asserting on ``(pid, sig)`` and non-POSIX hosts still work.
+    if signal_fn is not None:
+        try:
+            signal_fn(pid, sig)
+            return True
+        except (ProcessLookupError, OSError):
+            return False
+    killpg = getattr(os, "killpg", None)
+    if killpg is not None:
+        try:
+            killpg(pid, sig)  # pid == pgid for session leaders
+            return True
+        except ProcessLookupError:
+            return False
+        except OSError:
+            pass  # group gone / not a leader — fall through to bare-pid kill
+    if hasattr(os, "kill"):
+        try:
+            os.kill(pid, sig)
+            return True
+        except (ProcessLookupError, OSError):
+            return False
+    return False
+
+
 def _terminate_reclaimed_worker(
     pid: Optional[int],
     claim_lock: Optional[str],
@@ -2894,16 +2964,9 @@ def _terminate_reclaimed_worker(
         return info
     info["host_local"] = True
 
-    kill = signal_fn if signal_fn is not None else (
-        os.kill if hasattr(os, "kill") else None
-    )
-    if kill is None:
-        return info
-
     info["termination_attempted"] = True
-    try:
-        kill(int(pid), signal.SIGTERM)
-    except (ProcessLookupError, OSError):
+    # Kill the worker's whole process group so background children die too.
+    if not _signal_worker_group(pid, signal.SIGTERM, signal_fn=signal_fn):
         return info
 
     for _ in range(10):
@@ -2913,14 +2976,11 @@ def _terminate_reclaimed_worker(
         time.sleep(0.5)
 
     if _pid_alive(pid):
-        try:
-            # signal.SIGKILL doesn't exist on Windows; fall back to SIGTERM
-            # (which maps to TerminateProcess via the stdlib shim).
-            _sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
-            kill(int(pid), _sigkill)
+        # signal.SIGKILL doesn't exist on Windows; fall back to SIGTERM
+        # (which maps to TerminateProcess via the stdlib shim).
+        _sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
+        if _signal_worker_group(pid, _sigkill, signal_fn=signal_fn):
             info["sigkill"] = True
-        except (ProcessLookupError, OSError):
-            return info
 
     info["terminated"] = not _pid_alive(pid)
     return info
@@ -3026,27 +3086,19 @@ def enforce_max_runtime(
         # want a cleaner shutdown can install their own SIGTERM handler
         # before the grace expires.
         killed = False
-        kill = signal_fn if signal_fn is not None else (
-            os.kill if hasattr(os, "kill") else None
-        )
-        if kill is not None:
-            try:
-                kill(pid, signal.SIGTERM)
-            except (ProcessLookupError, OSError):
-                pass
+        # Kill the worker's whole process group so a runaway child
+        # (e.g. a backgrounded HPO/backtest) dies with the leader.
+        if _signal_worker_group(pid, signal.SIGTERM, signal_fn=signal_fn):
             # Short polling wait — no time.sleep on the write txn.
             for _ in range(10):
                 if not _pid_alive(pid):
                     break
                 time.sleep(0.5)
             if _pid_alive(pid):
-                try:
-                    # signal.SIGKILL doesn't exist on Windows.
-                    _sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
-                    kill(pid, _sigkill)
+                # signal.SIGKILL doesn't exist on Windows.
+                _sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
+                if _signal_worker_group(pid, _sigkill, signal_fn=signal_fn):
                     killed = True
-                except (ProcessLookupError, OSError):
-                    pass
 
         with write_txn(conn):
             cur = conn.execute(
@@ -3124,6 +3176,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     on the first occurrence — retrying a worker whose CLI keeps
     returning 0 without a terminal transition just loops forever.
     """
+    import signal
     crashed: list[str] = []
     # Per-crash details collected inside the main txn, used after it
     # closes to run ``_record_task_failure`` (which needs its own
@@ -3147,6 +3200,12 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 continue
 
             pid = int(row["worker_pid"])
+            # The worker (session-group leader) is already dead, but any
+            # children it backgrounded without waiting — e.g. a detached
+            # Optuna HPO or backtest — are now re-parented to init and may
+            # still be running, pegging the CPU. The group ``pid`` lives as
+            # long as a member does, so SIGKILL the whole group to reap them.
+            _signal_worker_group(pid, getattr(signal, "SIGKILL", 9))
             kind, code = _classify_worker_exit(pid)
             if kind == "clean_exit":
                 # Worker subprocess returned 0 but its task is still

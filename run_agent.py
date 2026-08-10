@@ -1401,6 +1401,10 @@ class AIAgent:
         # models to "give up" prematurely on complex tasks (#7915).
         self._budget_exhausted_injected = False
         self._budget_grace_call = False
+        # Kanban workers get ONE explicit last-chance warning (+ grace
+        # iteration) to file kanban_complete/kanban_block before the budget
+        # cuts them off — see the block in the main loop.
+        self._kanban_final_warning_sent = False
 
         # Activity tracking — updated on each API call, tool execution, and
         # stream chunk.  Used by the gateway timeout handler to report what the
@@ -11392,6 +11396,49 @@ class AIAgent:
                 if not self.quiet_mode:
                     self._safe_print(f"\n⚠️  Iteration budget exhausted ({self.iteration_budget.used}/{self.iteration_budget.max_total} iterations used)")
                 break
+
+            # ── Kanban worker last-chance completion ──────────────────────
+            # When the budget runs out, _handle_max_iterations forces a
+            # toolless summary — which makes calling kanban_complete
+            # impossible, so the dispatcher records the run as crashed
+            # ("protocol violation") and re-runs it from scratch even when
+            # the work fully succeeded.  On the FINAL allowed iteration of a
+            # dispatched kanban worker that hasn't filed completion yet,
+            # inject an explicit instruction and arm the budget grace flag
+            # so there is one guaranteed iteration for the completion call.
+            # Normal chat sessions (no HERMES_KANBAN_TASK) never enter here.
+            if (
+                api_call_count >= self.max_iterations
+                and not self._kanban_final_warning_sent
+                and os.environ.get("HERMES_KANBAN_TASK")
+                and "kanban_complete" in self.valid_tool_names
+            ):
+                _kanban_closed = any(
+                    m.get("role") == "tool"
+                    and m.get("name") in ("kanban_complete", "kanban_block")
+                    for m in messages
+                )
+                if not _kanban_closed:
+                    self._kanban_final_warning_sent = True
+                    self._budget_grace_call = True
+                    if not self.quiet_mode:
+                        self._safe_print(
+                            "\n⚠️  Final iteration for kanban worker without "
+                            "completion — injecting kanban_complete warning "
+                            "(+1 grace iteration)"
+                        )
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "⚠️ FINAL ITERATION — your tool budget is exhausted. "
+                            "You have NOT yet called kanban_complete or kanban_block. "
+                            "Call exactly one of them NOW, with a summary of what you "
+                            "accomplished and the artifact paths. Do not call any "
+                            "other tool first: a worker that exits without filing "
+                            "completion is recorded as crashed and ALL of its work "
+                            "is re-run from scratch."
+                        ),
+                    })
 
             # Fire step_callback for gateway hooks (agent:step event)
             if self.step_callback is not None:

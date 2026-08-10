@@ -69,3 +69,37 @@ services:
       - HERMES_GID=${HERMES_GID:-10000}
     # Localhost-only. For remote access, tunnel via `ssh -L 9119:localhost:9119`.
     command: ["dashboard", "--host", "127.0.0.1", "--no-open"]
+
+  # ---------------------------------------------------------------------------
+  # hermes-ml — standalone GPU training sidecar.
+  #
+  # The ONLY service with GPU access (runtime: nvidia). It runs a file-queue
+  # poller (docker/ml_job_poller.py): the `ml` profile, from inside the always-
+  # on gateway, submits training by dropping a job spec into the shared mount at
+  # ~/.hermes/ml-jobs/queue/ and this container runs it on the RTX 2080 Ti.
+  #
+  # Why a separate service: the gateway stays on the default `runc` runtime and
+  # carries no CUDA/torch, so a broken GPU/driver stack can take down THIS
+  # container only — never chat or the crons.
+  #
+  # Build depends on the `hermes-agent` image existing (FROM hermes-agent), so
+  # build the gateway first:  docker compose build gateway && docker compose build ml
+  ml:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ml
+    image: hermes-agent-ml
+    container_name: hermes-ml
+    restart: unless-stopped
+    runtime: nvidia
+    network_mode: host
+    depends_on:
+      - gateway
+    volumes:
+      - ~/.hermes:/opt/data
+    environment:
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    command: ["python3", "/opt/hermes/docker/ml_job_poller.py"]

@@ -3765,6 +3765,9 @@ class GatewayRunner:
             return
 
         TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out")
+        # Completion pings should carry a useful handoff (at least a
+        # short paragraph), but still stay compact for chat platforms.
+        COMPLETION_HANDOFF_MAX_CHARS = 1200
         # Terminal event kinds trigger automatic unsubscription — the task
         # is done, blocked, or in a retry-needed state that the human
         # shouldn't keep pinging a stale chat for. Previously we only
@@ -3820,11 +3823,13 @@ class GatewayRunner:
                                 if not events:
                                     continue
                                 task = _kb.get_task(conn, sub["task_id"])
+                                latest_summary = _kb.latest_summary(conn, sub["task_id"])
                                 deliveries.append({
                                     "sub": sub,
                                     "cursor": cursor,
                                     "events": events,
                                     "task": task,
+                                    "latest_summary": latest_summary,
                                     "board": slug,
                                 })
                         finally:
@@ -3858,20 +3863,22 @@ class GatewayRunner:
                         who = (task.assignee if task and task.assignee else None)
                         tag = f"@{who} " if who else ""
                         if kind == "completed":
-                            # Prefer the run's summary (the worker's
-                            # intentional human-facing handoff, carried
-                            # in the event payload), then fall back to
-                            # task.result for legacy rows written before
-                            # runs shipped.
+                            # Prefer the latest run summary (full worker
+                            # handoff), then event payload summary, then
+                            # task.result for legacy rows.
                             handoff = ""
                             payload_summary = None
                             if ev.payload and ev.payload.get("summary"):
                                 payload_summary = str(ev.payload["summary"])
-                            if payload_summary:
-                                h = payload_summary.strip().splitlines()[0][:200]
+                            latest_summary = (d.get("latest_summary") or "").strip()
+                            if latest_summary:
+                                h = latest_summary[:COMPLETION_HANDOFF_MAX_CHARS]
+                                handoff = f"\n{h}"
+                            elif payload_summary:
+                                h = payload_summary.strip()[:COMPLETION_HANDOFF_MAX_CHARS]
                                 handoff = f"\n{h}"
                             elif task and task.result:
-                                r = task.result.strip().splitlines()[0][:160]
+                                r = task.result.strip()[:COMPLETION_HANDOFF_MAX_CHARS]
                                 handoff = f"\n{r}"
                             msg = (
                                 f"✔ {tag}Kanban {sub['task_id']} done"

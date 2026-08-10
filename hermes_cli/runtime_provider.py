@@ -146,13 +146,28 @@ def _provider_supports_explicit_api_mode(provider: Optional[str], configured_pro
     return normalized_configured == normalized_provider
 
 
-def _copilot_runtime_api_mode(model_cfg: Dict[str, Any], api_key: str) -> str:
+def _copilot_runtime_api_mode(
+    model_cfg: Dict[str, Any],
+    api_key: str,
+    effective_model: Optional[str] = None,
+) -> str:
+    """Resolve the Copilot API surface for the model that will actually run.
+
+    ``effective_model`` is the explicitly requested model (``-m``/``--model``,
+    a mid-session ``/model`` switch, or a per-task pin) and takes precedence
+    over the persisted ``model.default``.  Without it the mode is derived from
+    whatever the config happens to hold, which silently routes a
+    Responses-only model (``gpt-5.5``, the ``gpt-5.6-*`` family, ``grok-4.5``)
+    to ``/chat/completions``.  That endpoint answers 400
+    ``unsupported_api_for_model``, which surfaces to the user as an empty
+    completion with exit code 0 — no output and no error.
+    """
     configured_provider = str(model_cfg.get("provider") or "").strip().lower()
     configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
     if configured_mode and _provider_supports_explicit_api_mode("copilot", configured_provider):
         return configured_mode
 
-    model_name = str(model_cfg.get("default") or "").strip()
+    model_name = str(effective_model or model_cfg.get("default") or "").strip()
     if not model_name:
         return "chat_completions"
 
@@ -219,7 +234,11 @@ def _resolve_runtime_from_pool_entry(
     elif provider == "nous":
         api_mode = "chat_completions"
     elif provider == "copilot":
-        api_mode = _copilot_runtime_api_mode(model_cfg, getattr(entry, "runtime_api_key", ""))
+        api_mode = _copilot_runtime_api_mode(
+            model_cfg,
+            getattr(entry, "runtime_api_key", ""),
+            effective_model=target_model,
+        )
         base_url = base_url or PROVIDER_REGISTRY["copilot"].inference_base_url
     elif provider == "azure-foundry":
         # Azure Foundry: read api_mode and base_url from config
@@ -753,6 +772,7 @@ def _resolve_explicit_runtime(
     model_cfg: Dict[str, Any],
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
+    target_model: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     explicit_api_key = str(explicit_api_key or "").strip()
     explicit_base_url = str(explicit_base_url or "").strip().rstrip("/")
@@ -867,7 +887,9 @@ def _resolve_explicit_runtime(
 
         api_mode = "chat_completions"
         if provider == "copilot":
-            api_mode = _copilot_runtime_api_mode(model_cfg, api_key)
+            api_mode = _copilot_runtime_api_mode(
+                model_cfg, api_key, effective_model=target_model
+            )
         elif provider == "xai":
             api_mode = "codex_responses"
         else:
@@ -968,6 +990,7 @@ def resolve_runtime_provider(
         model_cfg=model_cfg,
         explicit_api_key=explicit_api_key,
         explicit_base_url=explicit_base_url,
+        target_model=target_model,
     )
     if explicit_runtime:
         return explicit_runtime
@@ -1289,7 +1312,11 @@ def resolve_runtime_provider(
         base_url = cfg_base_url or creds.get("base_url", "").rstrip("/")
         api_mode = "chat_completions"
         if provider == "copilot":
-            api_mode = _copilot_runtime_api_mode(model_cfg, creds.get("api_key", ""))
+            api_mode = _copilot_runtime_api_mode(
+                model_cfg,
+                creds.get("api_key", ""),
+                effective_model=target_model,
+            )
         elif provider == "xai":
             api_mode = "codex_responses"
         else:
